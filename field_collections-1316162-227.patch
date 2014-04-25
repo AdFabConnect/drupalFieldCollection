@@ -1,0 +1,299 @@
+diff --git a/README.txt b/README.txt
+index 6ae4ab2..965b61d 100644
+--- a/README.txt
++++ b/README.txt
+@@ -7,7 +7,6 @@ Each field collection item is internally represented as an entity, which is
+ referenced via the field collection field in the host entity. While
+ conceptually field collections are treated as part of the host entity, each
+ field collection item may also be viewed and edited separately.
+- 
+ 
+  Usage
+  ------
+@@ -31,6 +30,6 @@ field collection item may also be viewed and edited separately.
+ Restrictions
+ -------------
+ 
+-  * As of now, the field collection field does not properly respect different
+-    languages of the host entity. Thus, for now it is suggested to only use the
+-    field for entities that are not translatable.
+\ No newline at end of file
++  * As of now, the field collection field does not properly respect field
++    translation. Thus, for now it is suggested to only use the field for
++    entities that are not translatable.
+diff --git a/field_collection.install b/field_collection.install
+index d2b1892..1e01019 100644
+--- a/field_collection.install
++++ b/field_collection.install
+@@ -328,3 +328,79 @@ function field_collection_update_7006() {
+     }
+   }
+ }
++
++/**
++ * Copy field_collection_items that are used by multiple entities.
++ **/
++function field_collection_update_7007() {
++  // 1. Find all fields of type field_collection.
++  // 2. Find all items that are used by multiple host-entities
++  // 3. Make copies of the items:
++  //  a) host entities pointing to the newest revision can keep them. (assume that no revision is reused)
++  //  b) if the specific revision doesn't exist anymore copy the current revision instead
++  $result = db_query('SELECT field_name FROM field_config WHERE type=:type AND deleted=0', array(':type' => 'field_collection'));
++  foreach ($result as $row) {
++    $name = $row->field_name;
++
++    $sql = <<<SQL
++SELECT f1.{$name}_value AS item_id
++FROM field_data_{$name} f1
++  INNER JOIN field_data_{$name} f2 ON f1.{$name}_value=f2.{$name}_value AND f1.entity_id!=f2.entity_id
++GROUP BY f1.{$name}_value
++SQL;
++
++    foreach (db_query($sql) as $fcid) {
++      if (!($current_fc = field_collection_item_load($fcid->item_id))) {
++        watchdog('field_collection', 'Unable to find field_collection_item with item_id=!item_id', array('!item_id' => $fcid->item_id), WATCHDOG_ERROR);
++        continue;
++      }
++
++      $sql = <<<SQL
++SELECT entity_type, entity_id, delta, {$name}_revision_id AS revision_id FROM field_data_{$name} WHERE {$name}_value=:item_id 
++SQL;
++      foreach (db_query($sql, array(':item_id' => $fcid->item_id)) as $item) {
++        $host_entity = entity_load($item->entity_type, array($item->entity_id));
++        if (!isset($host_entity[$item->entity_id])) {
++          // host entity doesn't exist - never mind.
++          continue;
++        } else {
++          $host_entity = $host_entity[$item->entity_id];
++        }
++
++        if ($item->revision_id == $current_fc->revision_id) {
++          // host entities holding the newest revision can keep them.
++          continue;
++        }
++
++        if (!($fc = field_collection_item_revision_load($item->revision_id))) {
++          // The revision stored in the field-item is not available anymore.
++          // Use the current revision instead.
++          $fc = clone $current_fc;
++          $msg = 'Unable to load revision !revision_id - copying the newest. Data might have been lost.';
++          watchdog('field_collection', $msg, array('!revision_id' => $item->revision_id), WATCHDOG_WARNING);
++        }
++        $fc->is_new = TRUE;
++        $fc->item_id = NULL;
++        $fc->revision_id = NULL;
++        $fc->setHostEntity($item->entity_type, $host_entity, LANGUAGE_NONE, FALSE);
++
++        $host_entity->{$name}[LANGUAGE_NONE][$item->delta] = array(
++          'value' => $fc->item_id,
++          'revision_id' => $fc->revision_id,
++          'entity' => $fc,
++        );
++        entity_save($item->entity_type, $host_entity);
++        $msg = 'Copied item(item_id=!item_id, revision_id=!revision_id) to new item(item_id=!new_item_id, revision_id=!new_revision_id) for entity !entity_type/!entity_id.';
++        $data = array(
++          '!item_id' => $fcid->item_id,
++          '!revision_id' => $item->revision_id,
++          '!new_item_id' => $fc->item_id,
++          '!new_revision_id' => $fc->revision_id,
++          '!entity_type' => $item->entity_type,
++          '!entity_id' => $item->entity_id
++        );
++        watchdog('field_collection', $msg, $data, WATCHDOG_INFO);
++      }
++    }
++  }
++}
+diff --git a/field_collection.module b/field_collection.module
+index 5692657..753cc1b 100644
+--- a/field_collection.module
++++ b/field_collection.module
+@@ -897,17 +897,25 @@ function field_collection_field_settings_form($field, $instance) {
+  */
+ function field_collection_field_insert($host_entity_type, $host_entity, $field, $instance, $langcode, &$items) {
+   foreach ($items as &$item) {
+-    if (isset($item['entity'])) {
+-      if ($entity = field_collection_field_get_entity($item)) {
+-        if (!empty($entity->is_new)) {
+-          $entity->setHostEntity($host_entity_type, $host_entity, LANGUAGE_NONE, FALSE);
+-        }
+-        $entity->save(TRUE);
+-        $item = array(
+-          'value' => $entity->item_id,
+-          'revision_id' => $entity->revision_id,
+-        );
++    if ($entity = field_collection_field_get_entity($item)) {
++      if (!empty($host_entity->is_new) && empty($entity->is_new)) {
++        // If the host entity is new but we have a field_collection that is not
++        // new, it means that its host is being cloned. Thus we need to clone
++        // the field collection entity as well.
++        $new_entity = clone $entity;
++        $new_entity->item_id = NULL;
++        $new_entity->revision_id = NULL;
++        $new_entity->is_new = TRUE;
++        $entity = $new_entity;
+       }
++      if (!empty($entity->is_new)) {
++        $entity->setHostEntity($host_entity_type, $host_entity, LANGUAGE_NONE, FALSE);
++      }
++      $entity->save(TRUE);
++      $item = array(
++        'value' => $entity->item_id,
++        'revision_id' => $entity->revision_id,
++      );
+     }
+   }
+ }
+diff --git a/field_collection.test b/field_collection.test
+index b62d048..9a22e49 100644
+--- a/field_collection.test
++++ b/field_collection.test
+@@ -299,6 +299,42 @@ class FieldCollectionBasicTestCase extends DrupalWebTestCase {
+ 
+     $this->drupalGet("node/$node->nid/revisions");
+   }
++
++  /**
++   * Make sure that field_collection-entities are copied when host-entities do.
++   */
++  public function testCopyingEntities() {
++    list($node, $entity) = $this->createNodeWithFieldCollection();
++
++    // Create a copy of that node.
++    $node->nid = NULL;
++    $node->vid = NULL;
++    $node->is_new = TRUE;
++
++    node_save($node);
++    $item = $node->{$this->field_name}[LANGUAGE_NONE][0];
++    $this->assertNotEqual($entity->item_id, $item['value']);
++
++    // Do a php clone to the $node object and save it.
++    $node2 = clone $node;
++    $node2->nid = NULL;
++    $node2->is_new = TRUE;
++    $node2->vid = NULL;
++    node_save($node2);
++
++    $item2 = $node2->{$this->field_name}[LANGUAGE_NONE][0];
++    $this->assertNotEqual($item2['value'], $item['value']);
++
++    // Create another copy this time (needlessly) forcing a new revision.
++    $node->nid = NULL;
++    $node->vid = NULL;
++    $node->is_new = TRUE;
++    $node->revision = TRUE;
++    node_save($node);
++    $item3 = $node->{$this->field_name}[LANGUAGE_NONE][0];
++    $this->assertNotEqual($item['value'], $item3['value']);
++  }
++
+ }
+ 
+ 
+@@ -420,3 +456,104 @@ class FieldCollectionRulesIntegrationTestCase extends DrupalWebTestCase {
+     RulesLog::logger()->checkLog();
+   }
+ }
++
++/**
++ * Test using field collection with content that gets translated.
++ */
++class FieldCollectionContentTranslationTestCase extends DrupalWebTestCase {
++
++  public static function getInfo() {
++    return array(
++      'name' => 'Field collection content translation',
++      'description' => 'Tests using content under translation.',
++      'group' => 'Field types',
++      'dependencies' => array('translation'),
++    );
++  }
++
++  public function setUp() {
++    parent::setUp(array('field_collection', 'translation'));
++    // Create a field_collection field to use for the tests.
++    $this->field_name = 'field_test_collection';
++    $this->field = array('field_name' => $this->field_name, 'type' => 'field_collection', 'cardinality' => 4);
++    $this->field = field_create_field($this->field);
++    $this->field_id = $this->field['id'];
++
++    $this->instance = array(
++      'field_name' => $this->field_name,
++      'entity_type' => 'node',
++      'bundle' => 'article',
++      'label' => $this->randomName() . '_label',
++      'description' => $this->randomName() . '_description',
++      'weight' => mt_rand(0, 127),
++      'settings' => array(),
++      'widget' => array(
++        'type' => 'field_collection_embed',
++        'label' => 'Test',
++        'settings' => array(),
++      ),
++    );
++    $this->instance = field_create_instance($this->instance);
++
++    // Add a field to the collection.
++    $field = array(
++      'field_name' => 'field_text',
++      'type' => 'text',
++      'cardinality' => 1,
++      'translatable' => FALSE,
++    );
++    field_create_field($field);
++    $instance = array(
++      'entity_type' => 'field_collection_item',
++      'field_name' => 'field_text',
++      'bundle' => $this->field_name,
++      'label' => 'Test text field',
++      'widget' => array(
++        'type' => 'text_textfield',
++      ),
++    );
++    field_create_instance($instance);
++
++    $admin_user = $this->drupalCreateUser(array('administer languages', 'administer content types', 'access administration pages', 'create article content', 'edit any article content', 'translate content'));
++
++    $this->drupalLogin($admin_user);
++    // Add German language.
++    locale_add_language('de');
++
++    // Set "Article" content type to use multilingual support.
++    variable_set('language_content_type_article', TRANSLATION_ENABLED);
++  }
++
++  /**
++   * Ensure field collections are cloned to new entities on content translation.
++   */
++  public function testContentTranslation() {
++    // Create "Article" content.
++    $edit['title'] = $this->randomName();
++    $edit['body[' . LANGUAGE_NONE . '][0][value]'] = $this->randomName();
++    $edit['language'] = 'en';
++    $field_collection_name = 'field_test_collection[' . LANGUAGE_NONE . '][0][field_text][' . LANGUAGE_NONE . '][0][value]';
++    $edit[$field_collection_name] = $this->randomName();
++
++    $this->drupalPost('node/add/article', $edit, t('Save'));
++    $this->assertRaw(t('Article %title has been created.', array('%title' => $edit['title'])), 'Article created.');
++    $node1 = $this->drupalGetNodeByTitle($edit['title']);
++
++    $this->drupalGet('node/' . $node1->nid . '/edit');
++    $this->drupalGet('node/' . $node1->nid . '/translate');
++    $this->drupalGet('node/add/article', array('query' => array('translation' => $node1->nid, 'target' => 'de')));
++
++    // Suffix translations with the langcode.
++    unset($edit['language']);
++    $edit['title'] .= 'DE';
++    $edit[$field_collection_name] .= 'DE';
++    $this->drupalPost('node/add/article', $edit, t('Save'), array('query' => array('translation' => $node1->nid, 'target' => 'de')));
++    $node2 = $this->drupalGetNodeByTitle($edit['title']);
++
++    // Ensure that our new node is the translation of the first one.
++    $this->assertEqual($node1->nid, $node2->tnid, 'Succesfully created translation.');
++    // And check to see that their field collections are different.
++    $this->assertNotEqual($node1->field_test_collection, $node2->field_test_collection, 'Field collections between translation source and translation differ.');
++  }
++
++}
