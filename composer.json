@@ -1,0 +1,20 @@
+
+{
+    "name": "drupal/drupalFieldCollection",
+    "description": "FieldCollection drupal module : apply patch for translate",
+    "type": "library",
+    "license": "BSD-3-Clause",
+    "keywords": [
+        "drupal",
+        "drupalFieldCollection",
+        "translate"
+    ],
+    "homepage": "https://github.com/AdFabConnect/drupalFieldCollection",
+    "authors": [
+         {
+            "name": "Guillaume Deplanque",
+            "email": "guillaume.deplanque@adfab.fr",
+            "homepage": "http://www.adfab.fr"
+        }
+    ],
+}
