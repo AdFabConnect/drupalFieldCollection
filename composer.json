@@ -1,6 +1,6 @@
 
 {
-    "name": "drupal/drupal-field-collection",
+    "name": "modules/field_collection",
     "description": "FieldCollection drupal module : apply patch for translate",
     "type": "library",
     "license": "BSD-3-Clause",
