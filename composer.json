@@ -6,7 +6,7 @@
     "license": "BSD-3-Clause",
     "keywords": [
         "drupal",
-        "drupalFieldCollection",
+        "FieldCollection",
         "translate"
     ],
     "homepage": "https://github.com/AdFabConnect/drupalFieldCollection",
@@ -16,5 +16,5 @@
             "email": "guillaume.deplanque@adfab.fr",
             "homepage": "http://www.adfab.fr"
         }
-    ],
+    ]
 }
